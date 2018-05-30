@@ -111,7 +111,7 @@ function main(){
 
             // backup images only from type FS datastores
             // skip other types
-            if(datastore.TEMPLATE.TM_MAD !== 'qcow2') {
+            if(datastore.TEMPLATE.TM_MAD !== 'qcow2' && datastore.TEMPLATE.TM_MAD !== 'shared' && datastore.TEMPLATE.TM_MAD !== 'ssh') {
               return callback(null);
             }
             
@@ -131,7 +131,7 @@ function main(){
                   imageRsrc.update('BACKUP_IN_PROGRESS=YES BACKUP_FINISHED_UNIX=--- BACKUP_FINISHED_HUMAN=--- BACKUP_STARTED_UNIX=' + Math.floor(Date.now() / 1000) + ' BACKUP_STARTED_HUMAN="' + dateTime.create().format('Y-m-d H:M:S') + '"', 1, callback);
               },
               function(callback) {
-                  processImage(image, function(err, backupCmd){
+                  processImage(image, datastore, function(err, backupCmd){
                       if(err) {
                           return callback(err);
                       }
@@ -190,7 +190,7 @@ function main(){
                     var datastore = results.datastores[key];
 
                     // filter just system datastores with TM_MAD == qcow2
-                    if(datastore.TYPE !== '1' || datastore.TEMPLATE.TM_MAD !== 'qcow2') {
+                    if(datastore.TYPE !== '1' || datastore.TEMPLATE.TM_MAD !== 'qcow2' && datastore.TEMPLATE.TM_MAD !== 'shared' && datastore.TEMPLATE.TM_MAD !== 'ssh') {
                         continue;
                     }
 
@@ -318,7 +318,7 @@ function meetsLabelFilter(labels) {
   return false;
 }
 
-function processImage(image, callback){
+function processImage(image, datastore, callback){
     var imageId = parseInt(image.ID);
     var vmId = parseInt(image.VMS.ID);
     var vms;
@@ -339,7 +339,7 @@ function processImage(image, callback){
             console.log('Backup non-persistent image %s named %s attached to VMs %s', imageId, image.NAME, vms);
         }
 
-        var cmd = generateBackupCmd('standard', image);
+        var cmd = generateBackupCmd('nonPersistentOrNotUsed', image, datastore);
         return callback(null, cmd);
     }
 
@@ -352,7 +352,7 @@ function processImage(image, callback){
         var vm = data.VM;
 
         if(vm.TEMPLATE.DISK.DISK_ID){
-            return backupUsedPersistentImage(image, imageId, vm, vmId, vm.TEMPLATE.DISK, [], function(err, data){
+            return backupUsedPersistentImage(image, imageId, datastore, vm, vmId, vm.TEMPLATE.DISK, [], function(err, data){
                 if(err) return callback(err);
 
                 callback(null, data);
@@ -372,7 +372,7 @@ function processImage(image, callback){
             }
         }
 
-        backupUsedPersistentImage(image, imageId, vm, vmId, vmDisk, excludedDisks, function(err, data){
+        backupUsedPersistentImage(image, imageId, datastore, vm, vmId, vmDisk, excludedDisks, function(err, data){
             if(err) return callback(err);
 
             callback(null, data);
@@ -380,7 +380,7 @@ function processImage(image, callback){
     });
 }
 
-function backupUsedPersistentImage(image, imageId, vm, vmId, disk, excludedDisks, callback){
+function backupUsedPersistentImage(image, imageId, datastore, vm, vmId, disk, excludedDisks, callback){
     var active   = true;
     var hostname = vmGetHostname(vm);
     var cmd;
@@ -401,15 +401,15 @@ function backupUsedPersistentImage(image, imageId, vm, vmId, disk, excludedDisks
 
     // backup commands generation
     if(active) {
-        cmd = generateBackupCmd('snapshotLive', image, vm, disk, excludedDisks);
+        cmd = generateBackupCmd('snapshotLive', image, datastore, vm, disk, excludedDisks);
     } else {
-        cmd = generateBackupCmd('standard', image);
+        cmd = generateBackupCmd('standard', image, datastore);
     }
 
     callback(null, cmd);
 }
 
-function generateBackupCmd(type, image, vm, disk, excludedDisks)
+function generateBackupCmd(type, image, datastore, vm, disk, excludedDisks)
 {
 	var srcPath, dstPath, mkDirPath;
 	var cmd = [];
@@ -420,8 +420,13 @@ function generateBackupCmd(type, image, vm, disk, excludedDisks)
     var sshCipher = '';
 	
 	if(program.insecure) sshCipher = ' -c arcfour128';
-	
+
+	if(type === 'nonPersistentOrNotUsed' && datastore.TEMPLATE.TM_MAD === 'ssh'){
+	    hostname = config.frontend;
+    }
+
 	switch(type){
+        case 'nonPersistentOrNotUsed':
 		case 'standard':
             // set src and dest paths
             srcPath = image.SOURCE + '.snap';
