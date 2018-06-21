@@ -21,11 +21,14 @@
 const program = require('commander');
 const readline = require('readline');
 const opennebula = require('opennebula');
-const fs = require('fs');
 const async = require('async');
 const shell = require('shelljs');
 const dateTime = require('node-datetime');
 const config = require('./config');
+
+const driverFs = require('./drivers/fs');
+const driverCeph = require('./drivers/ceph');
+
 var one;
 
 // define program
@@ -109,9 +112,8 @@ function main(){
             var datastoreLabels = getDatastoreLabelsArray(datastore);
             var imageLabels = getImageLabelsArray(image);
 
-            // backup images only from type FS datastores
-            // skip other types
-            if(datastore.TEMPLATE.TM_MAD !== 'qcow2' && datastore.TEMPLATE.TM_MAD !== 'shared' && datastore.TEMPLATE.TM_MAD !== 'ssh') {
+            // backup only from supported datastore types
+            if(datastore.TEMPLATE.TM_MAD !== 'qcow2' && datastore.TEMPLATE.TM_MAD !== 'shared' && datastore.TEMPLATE.TM_MAD !== 'ssh' && datastore.TEMPLATE.TM_MAD !== 'ceph') {
               return callback(null);
             }
             
@@ -189,31 +191,54 @@ function main(){
                 for(var key in results.datastores) if (results.datastores.hasOwnProperty(key)) {
                     var datastore = results.datastores[key];
 
-                    // filter just system datastores with TM_MAD == qcow2
-                    if(datastore.TYPE !== '1' || datastore.TEMPLATE.TM_MAD !== 'qcow2' && datastore.TEMPLATE.TM_MAD !== 'shared' && datastore.TEMPLATE.TM_MAD !== 'ssh') {
+                    // filter just system datastores
+                    if(datastore.TYPE !== '1') {
                         continue;
                     }
 
-                    // get random host form bridge list
-                    var hostname = config.bridgeList[Math.floor(Math.random()*config.bridgeList.length)];
+                    var cmd = [];
+                    var hostname;
 
-                    // create backup command
-                    var cmd = 'rsync -avhP --delete --exclude "disk.0.snap/0" oneadmin@' + hostname + ':' + datastore.BASE_PATH + '/ ' + config.backupDir + '/' + datastore.ID + '/';
+                    // qcow2 and shared ds drivers have shared filesystem, so just download from random host
+                    if(datastore.TEMPLATE.TM_MAD === 'qcow2' || datastore.TEMPLATE.TM_MAD === 'shared') {
+                        // get random host form bridge list
+                        hostname = vmGetHostname();
 
-                    // dry run, just print out command
+                        // create backup command
+                        cmd.push('rsync -avhP --delete --exclude "disk.0.snap/0" oneadmin@' + hostname + ':' + datastore.BASE_PATH + '/ ' + config.backupDir + datastore.ID + '/');
+                    }
+                    // other datastores doesn't have shared filesystem, so we have to download from each node without delete
+                    // todo: iterate over VMs and each VM deployment files independently
+                    else
+                    {
+                        var hostnames = getHostnames();
+                        for(var key1 in hostnames) if (hostnames.hasOwnProperty(key1)) {
+                            hostname = hostnames[key1];
+
+                            cmd.push('rsync -avhP --exclude "disk.0.snap/0" oneadmin@' + hostname + ':' + datastore.BASE_PATH + '/ ' + config.backupDir + datastore.ID + '/');
+                        }
+                    }
+
                     if(program.dryRun){
-                        console.log(cmd);
+                        console.log(cmd.join("\n"));
                         continue;
                     }
 
-                    // setup verbosity and print command
-                    if(program.verbose) {
-                        console.log('Run cmd: ' + cmd);
-                        options = {silent: false};
-                    }
+                    for(var cmdKey in cmd) if (backupCmd.hasOwnProperty(cmdKey)) {
+                        var cmdToRun = cmd[cmdKey];
+                        options = {silent : true};
 
-                    // run command
-                    var result = shell.exec(cmd, options);
+                        if(program.verbose){
+                            console.log('Run cmd: ' + cmdToRun);
+                            options = {silent : false};
+                        }
+
+                        var result = shell.exec(cmdToRun, options);
+
+                        if(result.code !== 0){
+                            process.exit(1);
+                        }
+                    }
 
                     if(result.code !== 0){
                         process.exit(1);
@@ -339,7 +364,7 @@ function processImage(image, datastore, callback){
             console.log('Backup non-persistent image %s named %s attached to VMs %s', imageId, image.NAME, vms);
         }
 
-        var cmd = generateBackupCmd('nonPersistentOrNotUsed', image, datastore);
+        var cmd = getDriverToUse(datastore).generateBackupCmd('nonPersistentOrNotUsed', image, datastore, vmGetHostname, program, config);
         return callback(null, cmd);
     }
 
@@ -401,123 +426,12 @@ function backupUsedPersistentImage(image, imageId, datastore, vm, vmId, disk, ex
 
     // backup commands generation
     if(active) {
-        cmd = generateBackupCmd('snapshotLive', image, datastore, vm, disk, excludedDisks);
+        cmd = getDriverToUse(datastore).generateBackupCmd('snapshotLive', image, datastore, vmGetHostname, program, config, vm, disk, excludedDisks);
     } else {
-        cmd = generateBackupCmd('standard', image, datastore);
+        cmd = getDriverToUse(datastore).generateBackupCmd('standard', image, datastore, vmGetHostname, program, config);
     }
 
     callback(null, cmd);
-}
-
-function generateBackupCmd(type, image, datastore, vm, disk, excludedDisks)
-{
-	var srcPath, dstPath, mkDirPath;
-	var cmd = [];
-	
-	var sourcePath = image.SOURCE.split('/');
-    var sourceName = sourcePath.pop();
-    var hostname   = vmGetHostname(vm);
-    var sshCipher = '';
-	
-	if(program.insecure) sshCipher = ' -c arcfour128';
-
-	if(type === 'nonPersistentOrNotUsed' && datastore.TEMPLATE.TM_MAD === 'ssh'){
-	    hostname = config.frontend;
-    }
-
-	switch(type){
-        case 'nonPersistentOrNotUsed':
-		case 'standard':
-            // set src and dest paths
-            srcPath = image.SOURCE + '.snap';
-            dstPath = config.backupDir + image.DATASTORE_ID + '/' + sourceName;
-
-            // make dest dir
-            mkDirPath = 'mkdir -p ' + dstPath + '.snap';
-            if(!fs.existsSync(mkDirPath)) cmd.push(mkDirPath);
-
-            // backup image
-            if(program.netcat) {
-                cmd.push('nc -l -p 5000 | dd of=' + dstPath + '.tmp & ssh oneadmin@' + hostname + ' \'dd if=' + image.SOURCE + ' | nc -w 3 ' + config.backupServerIp + ' 5000\'');
-            } else {
-                cmd.push('rsync -aHAXxWv --inplace --numeric-ids --progress -e "ssh -T' + sshCipher + ' -o Compression=no -x" oneadmin@' + hostname + ':' + image.SOURCE + ' ' + dstPath + '.tmp');
-            }
-            
-            // check image if driver is qcow2
-			if(image.TEMPLATE.DRIVER === 'qcow2' && program.check) {
-			    cmd.push('qemu-img check ' + dstPath);
-			}
-			
-			// replace old image by new one
-            cmd.push('mv -f ' + dstPath + '.tmp ' + dstPath);
-            
-            // create source snap dir if not exists
-            cmd.push('ssh oneadmin@' + hostname + ' \'[ -d ' + srcPath + ' ] || mkdir ' + srcPath + '\'');
-            
-            // backup snap dir
-            cmd.push('rsync -aHAXxWv --numeric-ids --progress -e "ssh -T' + sshCipher + ' -o Compression=no -x" oneadmin@' + hostname + ':' + srcPath + '/ ' + dstPath + '.snap/');
-			break;
-			
-        case 'snapshotLive':
-		    var tmpDiskSnapshot = config.backupTmpDir + 'one-' + vm.ID + '-weekly-backup';
-
-		    // excluded disks
-            var excludedDiskSpec = '';
-            for(var key in excludedDisks) if (excludedDisks.hasOwnProperty(key)) {
-                var excludedDisk = excludedDisks[key];
-
-                excludedDiskSpec += ' --diskspec ' + excludedDisk + ',snapshot=no';
-            }
-
-		    // create tmp snapshot file
-		    cmd.push('ssh oneadmin@' + hostname + ' \'touch ' + tmpDiskSnapshot + '\'');
-            var liveSnapshotCmd = 'ssh oneadmin@' + hostname + ' \'virsh -c ' + config.libvirtUri + ' snapshot-create-as --domain one-' + vm.ID + ' weekly-backup' + excludedDiskSpec + ' --diskspec ' + disk.TARGET + ',file=' + tmpDiskSnapshot + ' --disk-only --atomic --no-metadata';
-
-            // try to freeze fs if guest agent enabled
-            if(vm.TEMPLATE.FEATURES !== undefined && vm.TEMPLATE.FEATURES.GUEST_AGENT !== undefined && vm.TEMPLATE.FEATURES.GUEST_AGENT === 'yes') {
-                cmd.push(liveSnapshotCmd + ' --quiesce\' || ' + liveSnapshotCmd + '\'');
-
-            } else {
-                cmd.push(liveSnapshotCmd + '\'');
-            }
-
-		    // set src and dest paths
-			srcPath = image.SOURCE + '.snap';
-			dstPath = config.backupDir + image.DATASTORE_ID + '/' + sourceName;
-
-			// make dest dir
-			mkDirPath = 'mkdir -p ' + dstPath + '.snap';
-			if(!fs.existsSync(mkDirPath)) cmd.push(mkDirPath);
-
-			// backup image
-			if(program.netcat) {
-                cmd.push('nc -l -p 5000 | dd of=' + dstPath + '.tmp & ssh oneadmin@' + hostname + ' \'dd if=' + image.SOURCE + ' | nc -w 3 ' + config.backupServerIp + ' 5000\'');
-            } else {
-			    cmd.push('rsync -aHAXxWv --inplace --numeric-ids --progress -e "ssh -T' + sshCipher + ' -o Compression=no -x" oneadmin@' + hostname + ':' + image.SOURCE + ' ' + dstPath + '.tmp');
-			}
-			
-			// check image if driver is qcow2
-			if(image.TEMPLATE.DRIVER === 'qcow2' && program.check) {
-			    cmd.push('qemu-img check ' + dstPath + '.tmp');
-			}
-	
-            // replace old image by new one
-            cmd.push('mv -f ' + dstPath + '.tmp ' + dstPath);
-			
-			// create source snap dir if not exists
-			cmd.push('ssh oneadmin@' + hostname + ' \'[ -d ' + srcPath + ' ] || mkdir ' + srcPath + '\'');
-			// backup snap dir
-            cmd.push('rsync -aHAXxWv --numeric-ids --progress -e "ssh -T' + sshCipher + ' -o Compression=no -x" oneadmin@' + hostname + ':' + srcPath + '/ ' + dstPath + '.snap/');
-
-			// blockcommit tmp snapshot to original one
-            cmd.push('ssh oneadmin@' + hostname + ' \'virsh -c ' + config.libvirtUri + ' blockcommit one-' + vm.ID + ' ' + disk.TARGET + ' --active --pivot --shallow --verbose\'');
-
-			// clear tmp snapshot
-            cmd.push('ssh oneadmin@' + hostname + ' \'rm -f ' + tmpDiskSnapshot + '\'');
-			break;
-	}
-	
-	return cmd;
 }
 
 function vmGetHostname(vm){
@@ -534,6 +448,11 @@ function vmGetHostname(vm){
     return history.pop().HOSTNAME;
 }
 
+function getHostnames()
+{
+    return config.bridgeList;
+}
+
 function getDatastoreLabelsArray(datastore){
   if(datastore.TEMPLATE.LABELS !== undefined){
     return datastore.TEMPLATE.LABELS.split(',');
@@ -548,4 +467,18 @@ function getImageLabelsArray(image){
   }
   
   return [];
+}
+
+function getDriverToUse(datastore)
+{
+    switch(datastore.TEMPLATE.TM_MAD)
+    {
+        case 'qcow2':
+        case 'shared':
+        case 'ssh':
+            return driverFs;
+
+        case 'ceph':
+            return driverCeph;
+    }
 }
