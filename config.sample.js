@@ -40,6 +40,12 @@ module.exports = {
     // You should copy /etc/hosts from Front-end node
     bridgeList: ['node1', 'node2', 'node3'],
 
+    // Address of frontend node
+    // Only used when datastore TM_MAD = SSH
+    // Used for backup non-persistent and not used images from frontend node
+    // This have to be valid DNS name, which resolves to IP
+    frontend: 'engine',
+
     // Libvirt hypervisor connection URI
     libvirtUri: 'qemu:///system'
 }
