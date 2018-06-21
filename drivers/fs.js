@@ -1,13 +1,12 @@
 const fs = require('fs');
 
-function generateBackupCmd(type, image, datastore, vmGetHostname, program, config, vm, disk, excludedDisks)
+function generateBackupCmd(type, image, datastore, hostname, program, config, vm, disk, excludedDisks)
 {
     var srcPath, dstPath, mkDirPath;
     var cmd = [];
 
     var sourcePath = image.SOURCE.split('/');
     var sourceName = sourcePath.pop();
-    var hostname   = vmGetHostname(vm);
     var sshCipher = '';
 
     if(program.insecure) sshCipher = ' -c arcfour128';
