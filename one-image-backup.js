@@ -202,7 +202,7 @@ function main(){
                     // qcow2 and shared ds drivers have shared filesystem, so just download from random host
                     if(datastore.TEMPLATE.TM_MAD === 'qcow2' || datastore.TEMPLATE.TM_MAD === 'shared') {
                         // get random host form bridge list
-                        hostname = vmGetHostname();
+                        hostname = vmGetHostname(null, datastore);
 
                         // create backup command
                         cmd.push('rsync -avhP --delete --exclude "disk.0.snap/0" oneadmin@' + hostname + ':' + datastore.BASE_PATH + '/ ' + config.backupDir + datastore.ID + '/');
@@ -211,7 +211,7 @@ function main(){
                     // todo: iterate over VMs and each VM deployment files independently
                     else
                     {
-                        var hostnames = getHostnames();
+                        var hostnames = getHostnames(datastore);
                         for(var key1 in hostnames) if (hostnames.hasOwnProperty(key1)) {
                             hostname = hostnames[key1];
 
@@ -364,7 +364,7 @@ function processImage(image, datastore, callback){
             console.log('Backup non-persistent image %s named %s attached to VMs %s', imageId, image.NAME, vms);
         }
 
-        var cmd = getDriverToUse(datastore).generateBackupCmd('nonPersistentOrNotUsed', image, datastore, vmGetHostname, program, config);
+        var cmd = getDriverToUse(datastore).generateBackupCmd('nonPersistentOrNotUsed', image, datastore, vmGetHostname(null, datastore), program, config);
         return callback(null, cmd);
     }
 
@@ -407,7 +407,7 @@ function processImage(image, datastore, callback){
 
 function backupUsedPersistentImage(image, imageId, datastore, vm, vmId, disk, excludedDisks, callback){
     var active   = true;
-    var hostname = vmGetHostname(vm);
+    var hostname = vmGetHostname(vm, datastore);
     var cmd;
 
     // if VM is not in state ACTIVE
@@ -426,17 +426,18 @@ function backupUsedPersistentImage(image, imageId, datastore, vm, vmId, disk, ex
 
     // backup commands generation
     if(active) {
-        cmd = getDriverToUse(datastore).generateBackupCmd('snapshotLive', image, datastore, vmGetHostname, program, config, vm, disk, excludedDisks);
+        cmd = getDriverToUse(datastore).generateBackupCmd('snapshotLive', image, datastore, hostname, program, config, vm, disk, excludedDisks);
     } else {
-        cmd = getDriverToUse(datastore).generateBackupCmd('standard', image, datastore, vmGetHostname, program, config);
+        cmd = getDriverToUse(datastore).generateBackupCmd('standard', image, datastore, hostname, program, config);
     }
 
     callback(null, cmd);
 }
 
-function vmGetHostname(vm){
+function vmGetHostname(vm, datastore){
     if(!vm){
-        return config.bridgeList[Math.floor(Math.random()*config.bridgeList.length)];
+        var bridgeList = getHostnames(datastore);
+        return bridgeList[Math.floor(Math.random()*bridgeList.length)];
     }
 
     if(vm.HISTORY_RECORDS.HISTORY.HOSTNAME){
@@ -448,8 +449,12 @@ function vmGetHostname(vm){
     return history.pop().HOSTNAME;
 }
 
-function getHostnames()
+function getHostnames(datastore)
 {
+    if(datastore.TEMPLATE.BRIDGE_LIST !== undefined){
+        return datastore.TEMPLATE.BRIDGE_LIST.split(' ');
+    }
+
     return config.bridgeList;
 }
 
