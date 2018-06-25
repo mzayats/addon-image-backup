@@ -47,5 +47,10 @@ module.exports = {
     frontend: 'engine',
 
     // Libvirt hypervisor connection URI
-    libvirtUri: 'qemu:///system'
+    libvirtUri: 'qemu:///system',
+
+    // force to use --quiesce option durring live snapshot
+    // freeze filesystem using qemu-guest-agent
+    // usefull if there is not enabled qemu-guest-agent directly on VM template, but system wide
+    libvirtUseQuiesce: false
 }
