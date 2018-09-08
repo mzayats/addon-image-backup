@@ -35,7 +35,7 @@ function generateBackupCmd(type, image, datastore, hostname, program, config, vm
 
             // check image if driver is qcow2
             if(image.TEMPLATE.DRIVER === 'qcow2' && program.check) {
-                cmd.push('qemu-img check ' + dstPath);
+                cmd.push('qemu-img check ' + dstPath + '.tmp');
             }
 
             // replace old image by new one
