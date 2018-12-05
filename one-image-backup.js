@@ -33,7 +33,7 @@ var one;
 
 // define program
 program
-	.version('1.6.3')
+	.version('1.7.0')
     .option('-i --image <image_id>', 'image id or comma separated list of image ids to backup. Omit for backup all images')
     .option('-S --start-image <image_id>', 'image id to start from backup. Backups all following images including defined one', parseInt)
     .option('-a --datastore <datastore_id>', 'datastore id or comma separated list of datastore ids to backup from. Omit to backup from all datastores to backup')
@@ -121,17 +121,49 @@ function main(){
             if( ! meetsLabelFilter(datastoreLabels) && ! meetsLabelFilter(imageLabels)) {
               return callback(null);
             }
+
+            // get image resource
+            var imageRsrc = one.getImage(parseInt(image.ID));
+
+            // get vm resource
+            var vmRsrc = null;
+            var vmId = parseInt(image.VMS.ID);
+            if(vmId && image.PERSISTENT === '1') {
+                vmRsrc = one.getVM(vmId);
+            }
             
             async.series([
+                // set backup info to image
               function(callback) {
                   // Update image template with info about backup is started
                   if(program.dryRun) {
                       return callback(null);
                   }
 
-                  var imageRsrc = one.getImage(parseInt(image.ID));
                   imageRsrc.update('BACKUP_IN_PROGRESS=YES BACKUP_FINISHED_UNIX=--- BACKUP_FINISHED_HUMAN=--- BACKUP_STARTED_UNIX=' + Math.floor(Date.now() / 1000) + ' BACKUP_STARTED_HUMAN="' + dateTime.create().format('Y-m-d H:M:S') + '"', 1, callback);
+                },
+                // lock image
+                function (callback) {
+                    if(program.verbose) {
+                        console.log('#============================================================');
+                        console.log('Lock image ID: %d', image.ID);
+                    }
+
+                    imageRsrc.lock(4, callback);
+                },
+                // lock vm
+                function (callback) {
+                    if (vmRsrc) {
+                        if(program.verbose) {
+                            console.log('Lock VM ID: %d', vmId);
+                        }
+
+                        return vmRsrc.lock(4, callback);
+                    }
+
+                    callback(null);
               },
+                // run backup cmds
               function(callback) {
                   processImage(image, datastore, function(err, backupCmd){
                       if(err) {
@@ -163,19 +195,41 @@ function main(){
 
                       callback(null);
                   });
+                },
+                // unlock vm
+                function (callback) {
+                    if (vmRsrc) {
+                        if(program.verbose) {
+                            console.log('Unlock VM ID: %d', vmId);
+                        }
+
+                        return vmRsrc.unlock(callback);
+                    }
+
+                    callback(null);
               },
+                // unlock image
+                function (callback) {
+                    if(program.verbose) {
+                        console.log('Unlock image ID: %d', image.ID);
+                        console.log('#============================================================');
+                    }
+
+                    imageRsrc.unlock(callback);
+                },
+                // set backup info to image
               function(callback){
                   // Update image template with info about backup is finished
                   if(program.dryRun) {
                       return callback(null);
                   }
 
-                  var imageRsrc = one.getImage(parseInt(image.ID));
                   imageRsrc.update('BACKUP_IN_PROGRESS=NO BACKUP_FINISHED_UNIX=' + Math.floor(Date.now() / 1000) + ' BACKUP_FINISHED_HUMAN="' + dateTime.create().format('Y-m-d H:M:S') + '"', 1, callback);
               }
           ], callback);
         }, function (err) {
             if(err) {
+                console.log(err);
                 process.exit(1);
             }
 
